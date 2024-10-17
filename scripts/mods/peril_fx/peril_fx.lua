@@ -3,10 +3,44 @@
 local mod = get_mod("peril_fx")
 local MoodSettings = require("scripts/settings/camera/mood/mood_settings")
 local moods = MoodSettings.moods
+local mood_status = MoodSettings.status
 local WarpCharge = require("scripts/utilities/warp_charge")
-local orig_source_parameter_func = moods["warped"].source_parameter_funcs
-local orig_particles_func = moods["warped_low_to_high"].particle_material_scalar_funcs
-local orig_critical_peril_vfx = moods["warped_critical"].particle_effects_looping
+local originals = {
+    source_parameter_funcs = {
+        mood = "warped",
+        key = "source_parameter_funcs",
+        value = moods["warped"].source_parameter_funcs,
+    },
+    particle_material_scalar_funcs = {
+        mood = "warped_low_to_high",
+        key = "particle_material_scalar_funcs",
+        value = moods["warped_low_to_high"].particle_material_scalar_funcs,
+    },
+    critical_peril_vfx = {
+        mood = "warped_critical",
+        key = "particle_effects_looping",
+        value = moods["warped_critical"].particle_effects_looping,
+        toggle = "show_critical_peril_vfx",
+    },
+    high_peril_sfx = {
+        mood = "warped_high_to_critical",
+        key = "sound_start_event",
+        value = moods["warped_high_to_critical"].sound_start_event,
+        toggle = "play_high_peril_sfx",
+    },
+    critical_peril_sfx = {
+        mood = "warped_critical",
+        key = "sound_start_event",
+        value = moods["warped_critical"].sound_start_event,
+        toggle = "play_critical_peril_sfx",
+    },
+    warp_build_up_loop_start = {
+        mood = "warped",
+        key = "looping_sound_start_events",
+        value = moods["warped"].looping_sound_start_events,
+        toggle = "play_peril_build_up_sfx",
+    },
+}
 
 local function set_sfx_intensity(wwise_world, source_id, player)
     local camera_handler = player.camera_handler
@@ -74,28 +108,79 @@ local function set_vfx_intensity(world, particle_id, player, previous_values)
     end
 end
 
-local function toggle_critical_peril_vfx()
-    if mod:get("show_critical_peril_vfx") then
-        moods["warped_critical"].particle_effects_looping = orig_critical_peril_vfx
+local function reset_mood_value(id, value)
+    local mood = originals[id].mood
+    local key = originals[id].key
+    local new_value = value or originals[id].value
+    moods[mood][key] = new_value
+end
+
+local function remove_mood_value(id)
+    local mood = originals[id].mood
+    local key = originals[id].key
+    moods[mood][key] = nil
+end
+
+local function toggle_fx(orig_id, setting_id, enabled_value)
+    if mod:get(setting_id) then
+        reset_mood_value(orig_id, enabled_value)
     else
-        moods["warped_critical"].particle_effects_looping = nil
+        remove_mood_value(orig_id)
     end
 end
 
-mod.on_enabled = function (initial_call)
-    moods["warped"].source_parameter_funcs = {set_sfx_intensity,}
+mod.on_enabled = function(initial_call)
     moods["warped_low_to_high"].particle_material_scalar_funcs = {set_vfx_intensity,}
-    toggle_critical_peril_vfx()
+    for orig_id, item in pairs(originals) do
+        if item.toggle then
+            toggle_fx(orig_id, item.toggle)
+        end
+    end
+    toggle_fx("source_parameter_funcs", "play_peril_build_up_sfx", {set_sfx_intensity,})
 end
 
-mod.on_setting_changed = function (setting_id)
-    if setting_id == "show_critical_peril_vfx" then
-        toggle_critical_peril_vfx()
+mod.on_disabled = function(initial_call)
+    for orig_id, _ in pairs(originals) do
+        reset_mood_value(orig_id)
     end
 end
 
-mod.on_disabled = function (initial_call)
-    moods["warped"].source_parameter_funcs = orig_source_parameter_func
-    moods["warped_low_to_high"].particle_material_scalar_funcs = orig_particles_func
-    moods["warped_critical"].particle_effects_looping = orig_critical_peril_vfx
+local checkMoods = false
+mod.on_setting_changed = function(setting_id)
+    if setting_id == "show_critical_peril_vfx" then
+        toggle_fx("critical_peril_vfx", setting_id)
+    elseif setting_id == "play_high_peril_sfx" then
+        toggle_fx("high_peril_sfx", setting_id)
+    elseif setting_id == "play_critical_peril_sfx" then
+        toggle_fx("critical_peril_sfx", setting_id)
+    elseif setting_id == "play_peril_build_up_sfx" then
+        toggle_fx("warp_build_up_loop_start", setting_id)
+        toggle_fx("source_parameter_funcs", setting_id, {set_sfx_intensity,})
+        checkMoods = true
+    end
 end
+
+mod:hook_safe("PlayerUnitMoodExtension", "_add_mood", function(self, t, mood_type, reset_time)
+    if mood_type == "warped" and not mod:get("play_peril_build_up_sfx") then
+        -- Set peril intensity slider in place of disabled source_parameter_funcs
+        local options_peril_slider = mod:get("peril_sfx_intensity") or 100
+        WwiseWorld.set_global_parameter(self._world, "options_peril_slider", options_peril_slider / 100)
+    end
+end)
+
+mod:hook("MoodHandler", "_update_active_moods", function(func, self, mood_data)
+    if checkMoods then
+        if mood_data.warped.status == mood_status.active then
+            -- Make sure looping start/stop events are played if mod setting is changed while warped
+            if mod:get("play_peril_build_up_sfx")  then
+                -- Add warped to added_moods
+                self._current_moods_status.warped = mood_status.inactive
+            else
+                -- Add warped to removing_moods
+                mood_data.warped.status = mood_status.removing
+            end
+        end
+        checkMoods = false
+    end
+    return func(self, mood_data)
+end)
